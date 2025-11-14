@@ -271,6 +271,14 @@ Based on extensive experimentation (11 training runs):
 - Enhanced augmentation (flips + rotations) crucial for U-Net performance
 - Standard hyperparameters outperform over-engineered solutions
 
+### Hardware Used for Training
+
+All experiments were conducted on the following hardware:
+- **CPU:** AMD Ryzen 7 7700X (8 cores, 16 threads)
+- **GPU:** NVIDIA RTX 3060 (12GB VRAM)
+- **RAM:** 32GB DDR5
+- **Training Time:** ~6 hours total for 11 runs (average ~30-35 minutes per run with 60 epochs)
+
 ## 🔧 Troubleshooting
 
 ### Out of Memory (OOM) Errors
