@@ -1,0 +1,11 @@
+.idea/
+
+.venv/
+
+__pycache__/
+
+dataset/*
+!dataset/.gitkeep
+
+output/*
+!output/.gitkeep
