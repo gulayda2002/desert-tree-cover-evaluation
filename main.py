@@ -1,22 +1,22 @@
-import os
-from glob import glob
 import argparse
 import json
+import os
 import random
 from datetime import datetime
+from glob import glob
 from pathlib import Path
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import confusion_matrix
+import seaborn as sns
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import confusion_matrix
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 ##########################################
 # CONFIG
@@ -84,7 +84,7 @@ class DesertDataset(Dataset):
                 k = random.choice([1, 2, 3])  # 90, 180, 270 degrees
                 img = np.rot90(img, k).copy()  # Copy to avoid negative strides
                 mask = np.rot90(mask, k).copy()
-        
+
         img = img.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))  # HWC → CHW
 
@@ -109,12 +109,11 @@ def collect_pairs(split):
     img_files = []
     for ext in img_exts:
         img_files.extend(glob(f"{folder}/images/*.{ext}"))
+
     img_files = sorted(img_files)
 
     if len(img_files) == 0:
-        raise FileNotFoundError(
-            f"No images found in {folder}/images (looked for extensions: {img_exts})."
-        )
+        raise FileNotFoundError(f"No images found in {folder}/images (looked for extensions: {img_exts}).")
 
     paired_imgs, paired_masks = [], []
 
@@ -127,8 +126,9 @@ def collect_pairs(split):
         if not os.path.exists(mask_path):
             # Try other common mask extensions within masks/
             candidates = []
-            for ext in ["jpg", "jpeg", "png", "JPG", "JPEG", "PNG"]:
+            for ext in img_exts:
                 candidates.extend(glob(f"{folder}/masks/{name}.{ext}"))
+
             if len(candidates) > 0:
                 mask_path = candidates[0]
             else:
@@ -139,9 +139,7 @@ def collect_pairs(split):
         paired_masks.append(mask_path)
 
     if len(paired_imgs) == 0:
-        raise RuntimeError(
-            f"Found {len(img_files)} images in {folder}/images but no paired masks in {folder}/masks."
-        )
+        raise RuntimeError(f"Found {len(img_files)} images in {folder}/images but no paired masks in {folder}/masks.")
 
     return paired_imgs, paired_masks
 
@@ -150,7 +148,8 @@ def collect_pairs(split):
 # RANDOM FOREST SEGMENTATION
 ##########################################
 
-def train_random_forest(img_paths, mask_paths, max_pixels_per_image=10000, balance=True, n_estimators=80, max_depth=12, min_samples_split=2):
+def train_random_forest(img_paths, mask_paths, max_pixels_per_image=10000, balance=True, n_estimators=80, max_depth=12,
+                        min_samples_split=2):
     """Train a RandomForest on sampled pixels.
 
     To avoid OOM, we sample up to max_pixels_per_image per image. If balance=True we
@@ -179,11 +178,14 @@ def train_random_forest(img_paths, mask_paths, max_pixels_per_image=10000, balan
                 if len(pos_idx) >= per_class:
                     pos_sample = np.random.choice(pos_idx, per_class, replace=False)
                 else:
-                    pos_sample = np.random.choice(pos_idx, per_class, replace=True) if len(pos_idx) > 0 else np.array([], dtype=int)
+                    pos_sample = np.random.choice(pos_idx, per_class, replace=True) if len(pos_idx) > 0 else np.array(
+                        [], dtype=int)
+
                 if len(neg_idx) >= per_class:
                     neg_sample = np.random.choice(neg_idx, per_class, replace=False)
                 else:
-                    neg_sample = np.random.choice(neg_idx, per_class, replace=True) if len(neg_idx) > 0 else np.array([], dtype=int)
+                    neg_sample = np.random.choice(neg_idx, per_class, replace=True) if len(neg_idx) > 0 else np.array(
+                        [], dtype=int)
                 sample_idx = np.concatenate([pos_sample, neg_sample])
             else:
                 sample_idx = np.random.choice(total_pixels, max_pixels_per_image, replace=False)
@@ -204,12 +206,12 @@ def train_random_forest(img_paths, mask_paths, max_pixels_per_image=10000, balan
     y = np.hstack(y_parts).astype(np.uint8)
     X = X.astype(np.float32)  # RF will cast anyway; ensures reasonable dtype
 
-    approx_mem_mb = (X.nbytes + y.nbytes) / (1024**2)
+    approx_mem_mb = (X.nbytes + y.nbytes) / (1024 ** 2)
     print(f"[RF] Training samples: {X.shape[0]} features per sample: {X.shape[1]} (~{approx_mem_mb:.1f} MB in arrays)")
 
     rf = RandomForestClassifier(
-        n_estimators=n_estimators, 
-        max_depth=max_depth, 
+        n_estimators=n_estimators,
+        max_depth=max_depth,
         min_samples_split=min_samples_split,
         min_samples_leaf=1,  # Allow very fine splits
         n_jobs=-1
@@ -285,32 +287,34 @@ class UNet(nn.Module):
 
 class DiceLoss(nn.Module):
     """Dice loss for segmentation - works better with class imbalance."""
+
     def __init__(self, smooth=1.0):
         super().__init__()
         self.smooth = smooth
-    
+
     def forward(self, pred, target):
         # pred: (N, C, H, W) logits
         # target: (N, H, W) class indices
         pred_soft = torch.softmax(pred, dim=1)
         target_one_hot = torch.nn.functional.one_hot(target, num_classes=pred.shape[1])
         target_one_hot = target_one_hot.permute(0, 3, 1, 2).float()
-        
+
         intersection = (pred_soft * target_one_hot).sum(dim=(2, 3))
         union = pred_soft.sum(dim=(2, 3)) + target_one_hot.sum(dim=(2, 3))
-        
+
         dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
         return 1.0 - dice.mean()
 
 
 class CombinedLoss(nn.Module):
     """Combines CrossEntropy and Dice loss."""
+
     def __init__(self, weight=None, dice_weight=0.5):
         super().__init__()
         self.ce = nn.CrossEntropyLoss(weight=weight)
         self.dice = DiceLoss()
         self.dice_weight = dice_weight
-    
+
     def forward(self, pred, target):
         ce_loss = self.ce(pred, target)
         dice_loss = self.dice(pred, target)
@@ -341,6 +345,7 @@ def ensure_outdir(outdir: str | None) -> Path:
         outdir_path = Path("output") / datetime.now().strftime("%Y%m%d_%H%M%S")
     else:
         outdir_path = Path(outdir)
+
     outdir_path.mkdir(parents=True, exist_ok=True)
     return outdir_path
 
@@ -351,15 +356,16 @@ def plot_metrics_bar(rf_mean, unet_mean=None, out_path: Path | None = None):
     width = 0.35
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.bar(x - width/2, rf_mean, width, label="Random Forest")
+    ax.bar(x - width / 2, rf_mean, width, label="Random Forest")
     if unet_mean is not None:
-        ax.bar(x + width/2, unet_mean, width, label="U-Net")
+        ax.bar(x + width / 2, unet_mean, width, label="U-Net")
+
     ax.set_ylabel("Score")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylim(0, 1.0)
     ax.legend()
-    ax.grid(True, axis='y', linestyle='--', alpha=0.3)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
     fig.tight_layout()
     if out_path is not None:
         fig.savefig(out_path, dpi=300)
@@ -368,39 +374,43 @@ def plot_metrics_bar(rf_mean, unet_mean=None, out_path: Path | None = None):
 
 def plot_confmat(cm: np.ndarray, title: str, out_path: Path | None = None):
     fig, ax = plt.subplots(figsize=(4, 3.5))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False, ax=ax,
-                xticklabels=["BG", "FG"], yticklabels=["BG", "FG"])
+    sns.heatmap(
+        cm, annot=True, fmt="d", cmap="Blues", cbar=False, ax=ax, xticklabels=["BG", "FG"], yticklabels=["BG", "FG"]
+    )
     ax.set_xlabel("Predicted")
     ax.set_ylabel("True")
     ax.set_title(title)
     fig.tight_layout()
     if out_path is not None:
         fig.savefig(out_path, dpi=300)
+
     plt.close(fig)
 
 
-def save_qualitative(image_bgr: np.ndarray, gt_mask: np.ndarray, rf_pred: np.ndarray | None,
-                     unet_pred: np.ndarray | None, out_path: Path):
+def save_qualitative(
+        image_bgr: np.ndarray, gt_mask: np.ndarray, rf_pred: np.ndarray | None, unet_pred: np.ndarray | None,
+        out_path: Path
+):
     image_rgb = cv2.cvtColor(cv2.resize(image_bgr, (IMAGE_SIZE, IMAGE_SIZE)), cv2.COLOR_BGR2RGB)
     fig_cols = 3 if unet_pred is None else 4
-    fig, axs = plt.subplots(1, fig_cols, figsize=(4*fig_cols, 4))
+    fig, axs = plt.subplots(1, fig_cols, figsize=(4 * fig_cols, 4))
 
     axs[0].imshow(image_rgb)
     axs[0].set_title("Image")
-    axs[0].axis('off')
+    axs[0].axis("off")
 
-    axs[1].imshow(gt_mask, cmap='gray', vmin=0, vmax=1)
+    axs[1].imshow(gt_mask, cmap="gray", vmin=0, vmax=1)
     axs[1].set_title("GT Mask")
-    axs[1].axis('off')
+    axs[1].axis("off")
 
-    axs[2].imshow(rf_pred, cmap='gray', vmin=0, vmax=1)
+    axs[2].imshow(rf_pred, cmap="gray", vmin=0, vmax=1)
     axs[2].set_title("RF Pred")
-    axs[2].axis('off')
+    axs[2].axis("off")
 
     if unet_pred is not None:
-        axs[3].imshow(unet_pred, cmap='gray', vmin=0, vmax=1)
+        axs[3].imshow(unet_pred, cmap="gray", vmin=0, vmax=1)
         axs[3].set_title("U-Net Pred")
-        axs[3].axis('off')
+        axs[3].axis("off")
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=300)
@@ -417,8 +427,10 @@ def main():
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="Number of U-Net training epochs")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="U-Net batch size")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of samples per split (0 = no limit)")
-    parser.add_argument("--rf-max-pixels", type=int, default=10000, help="Max sampled pixels per image for RF (0 = all)")
-    parser.add_argument("--rf-no-balance", action="store_true", help="Disable foreground/background balancing for RF sampling")
+    parser.add_argument("--rf-max-pixels", type=int, default=10000,
+                        help="Max sampled pixels per image for RF (0 = all)")
+    parser.add_argument("--rf-no-balance", action="store_true",
+                        help="Disable foreground/background balancing for RF sampling")
     parser.add_argument("--rf-n-estimators", type=int, default=80, help="Number of trees for RF")
     parser.add_argument("--rf-max-depth", type=int, default=12, help="Max depth for RF trees")
     parser.add_argument("--rf-min-samples", type=int, default=2, help="Min samples to split for RF trees")
@@ -466,7 +478,9 @@ def main():
         pred = rf_predict(rf, img)
         gt = load_mask(mask)
         OA, IoU, Kappa = metrics(gt, pred)
-        rf_val_OA.append(OA); rf_val_IoU.append(IoU); rf_val_Kappa.append(Kappa)
+        rf_val_OA.append(OA);
+        rf_val_IoU.append(IoU);
+        rf_val_Kappa.append(Kappa)
         rf_val_cm += confusion_matrix(gt.flatten(), pred.flatten(), labels=[0, 1])
 
     # Evaluate RF on test set
@@ -477,7 +491,9 @@ def main():
         pred = rf_predict(rf, img)
         gt = load_mask(mask)
         OA, IoU, Kappa = metrics(gt, pred)
-        rf_test_OA.append(OA); rf_test_IoU.append(IoU); rf_test_Kappa.append(Kappa)
+        rf_test_OA.append(OA);
+        rf_test_IoU.append(IoU);
+        rf_test_Kappa.append(Kappa)
         rf_test_cm += confusion_matrix(gt.flatten(), pred.flatten(), labels=[0, 1])
 
     ##########################################
@@ -488,7 +504,7 @@ def main():
         model = UNet().to(DEVICE)
         # Adam optimizer - try standard 1e-3 LR which worked better
         optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-        
+
         # Calculate class weights to handle imbalance
         print("Calculating class weights from training data...")
         total_pixels = 0
@@ -497,7 +513,7 @@ def main():
             mask = load_mask(mask_path)
             total_pixels += mask.size
             fg_pixels += np.sum(mask)
-        
+
         bg_pixels = total_pixels - fg_pixels
         if fg_pixels > 0:
             # Weight inversely proportional to frequency
@@ -508,18 +524,18 @@ def main():
         else:
             class_weights = None
             print("Warning: No foreground pixels found in sample!")
-        
+
         # Use simple CrossEntropyLoss with class weights
         criterion = nn.CrossEntropyLoss(weight=class_weights)
         # ReduceLROnPlateau scheduler
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=5)
 
         train_ds = DesertDataset(train_imgs, train_masks, augment=True)  # Enable augmentation for better generalization
         train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
         # Mixed precision training for faster training and better memory usage
-        scaler = torch.amp.GradScaler('cuda') if DEVICE == "cuda" else None
-        
+        scaler = torch.amp.GradScaler("cuda") if DEVICE == "cuda" else None
+
         best_val_iou = 0.0
         for epoch in range(epochs):
             model.train()
@@ -529,13 +545,13 @@ def main():
                 img, mask = img.to(DEVICE), mask.to(DEVICE)
 
                 optimizer.zero_grad()
-                
+
                 # Mixed precision forward pass
                 if scaler is not None:
-                    with torch.amp.autocast('cuda'):
+                    with torch.amp.autocast("cuda"):
                         pred = model(img)
                         loss = criterion(pred, mask)
-                    
+
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -549,10 +565,10 @@ def main():
                     optimizer.step()
 
                 epoch_loss += loss.item()
-                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-            
+                pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+
             avg_loss = epoch_loss / len(train_dl)
-            
+
             # Validate every epoch for better monitoring and model selection
             if True:  # Every epoch
                 model.eval()
@@ -567,19 +583,20 @@ def main():
                         gt = load_mask(mask_path)
                         _, iou, _ = metrics(gt, pred)
                         val_iou_list.append(iou)
-                
+
                 val_iou = np.mean(val_iou_list)
-                print(f"\nEpoch {epoch+1}: Train Loss={avg_loss:.4f}, Val mIoU={val_iou:.4f}, LR={optimizer.param_groups[0]['lr']:.2e}")
-                
+                print(
+                    f"\nEpoch {epoch + 1}: Train Loss={avg_loss:.4f}, Val mIoU={val_iou:.4f}, LR={optimizer.param_groups[0]['lr']:.2e}")
+
                 # Step ReduceLROnPlateau scheduler based on validation mIoU
                 scheduler.step(val_iou)
-                
+
                 if val_iou > best_val_iou:
                     best_val_iou = val_iou
                     # Save best model
                     torch.save(model.state_dict(), outdir / "best_unet.pth")
                     print(f"Saved best model (mIoU: {best_val_iou:.4f})")
-        
+
         # Load best model for final evaluation
         if (outdir / "best_unet.pth").exists():
             model.load_state_dict(torch.load(outdir / "best_unet.pth"))
@@ -604,7 +621,9 @@ def main():
 
             gt = load_mask(mask)
             OA, IoU, Kappa = metrics(gt, pred)
-            unet_val_OA.append(OA); unet_val_IoU.append(IoU); unet_val_Kappa.append(Kappa)
+            unet_val_OA.append(OA)
+            unet_val_IoU.append(IoU)
+            unet_val_Kappa.append(Kappa)
             unet_val_cm += confusion_matrix(gt.flatten(), pred.flatten(), labels=[0, 1])
 
         ##########################################
@@ -625,53 +644,55 @@ def main():
 
             gt = load_mask(mask)
             OA, IoU, Kappa = metrics(gt, pred)
-            unet_test_OA.append(OA); unet_test_IoU.append(IoU); unet_test_Kappa.append(Kappa)
+            unet_test_OA.append(OA);
+            unet_test_IoU.append(IoU);
+            unet_test_Kappa.append(Kappa)
             unet_test_cm += confusion_matrix(gt.flatten(), pred.flatten(), labels=[0, 1])
 
     ##########################################
     # PRINT RESULTS
     ##########################################
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("RANDOM FOREST RESULTS")
-    print("="*60)
-    
+    print("=" * 60)
+
     # Validation results
     rf_val_mean = [float(np.mean(rf_val_OA)), float(np.mean(rf_val_IoU)), float(np.mean(rf_val_Kappa))]
     print("\n--- Validation Set ---")
     print(f"OA    : {rf_val_mean[0]:.4f}")
     print(f"mIoU  : {rf_val_mean[1]:.4f}")
     print(f"Kappa : {rf_val_mean[2]:.4f}")
-    
+
     # Test results
     rf_test_mean = [float(np.mean(rf_test_OA)), float(np.mean(rf_test_IoU)), float(np.mean(rf_test_Kappa))]
     print("\n--- Test Set ---")
     print(f"OA    : {rf_test_mean[0]:.4f}")
     print(f"mIoU  : {rf_test_mean[1]:.4f}")
     print(f"Kappa : {rf_test_mean[2]:.4f}")
-    
+
     # Save RF confusion matrices
     plot_confmat(rf_val_cm, "RF Val Confusion Matrix", outdir / "rf_val_confusion_matrix.png")
     plot_confmat(rf_test_cm, "RF Test Confusion Matrix", outdir / "rf_test_confusion_matrix.png")
 
     if not args.rf_only:
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("U-NET RESULTS")
-        print("="*60)
-        
+        print("=" * 60)
+
         # Validation results
         unet_val_mean = [float(np.mean(unet_val_OA)), float(np.mean(unet_val_IoU)), float(np.mean(unet_val_Kappa))]
         print("\n--- Validation Set ---")
         print(f"OA    : {unet_val_mean[0]:.4f}")
         print(f"mIoU  : {unet_val_mean[1]:.4f}")
         print(f"Kappa : {unet_val_mean[2]:.4f}")
-        
+
         # Test results
         unet_test_mean = [float(np.mean(unet_test_OA)), float(np.mean(unet_test_IoU)), float(np.mean(unet_test_Kappa))]
         print("\n--- Test Set ---")
         print(f"OA    : {unet_test_mean[0]:.4f}")
         print(f"mIoU  : {unet_test_mean[1]:.4f}")
         print(f"Kappa : {unet_test_mean[2]:.4f}")
-        
+
         # Save U-Net confusion matrices
         plot_confmat(unet_val_cm, "U-Net Val Confusion Matrix", outdir / "unet_val_confusion_matrix.png")
         plot_confmat(unet_test_cm, "U-Net Test Confusion Matrix", outdir / "unet_test_confusion_matrix.png")
@@ -681,16 +702,17 @@ def main():
 
     # Save metrics JSON with both val and test
     results = {
-        "rf": {
-            "validation": {"OA": rf_val_mean[0], "mIoU": rf_val_mean[1], "Kappa": rf_val_mean[2]},
-            "test": {"OA": rf_test_mean[0], "mIoU": rf_test_mean[1], "Kappa": rf_test_mean[2]}
+        'rf': {
+            'validation': {'OA': rf_val_mean[0], 'mIoU': rf_val_mean[1], 'Kappa': rf_val_mean[2]},
+            'test': {'OA': rf_test_mean[0], 'mIoU': rf_test_mean[1], 'Kappa': rf_test_mean[2]}
         }
     }
     if unet_val_mean is not None and unet_test_mean is not None:
-        results["unet"] = {
-            "validation": {"OA": unet_val_mean[0], "mIoU": unet_val_mean[1], "Kappa": unet_val_mean[2]},
-            "test": {"OA": unet_test_mean[0], "mIoU": unet_test_mean[1], "Kappa": unet_test_mean[2]}
+        results['unet'] = {
+            'validation': {'OA': unet_val_mean[0], 'mIoU': unet_val_mean[1], 'Kappa': unet_val_mean[2]},
+            'test': {'OA': unet_test_mean[0], 'mIoU': unet_test_mean[1], 'Kappa': unet_test_mean[2]}
         }
+
     (outdir / "metrics.json").write_text(json.dumps(results, indent=2))
 
     # Comparison bar plots (using test set results for main comparison)
@@ -702,15 +724,18 @@ def main():
     for i, (img_path, mask_path) in enumerate(zip(test_imgs, test_masks)):
         if i >= num_samples:
             break
+
         image_bgr = cv2.imread(img_path)
         gt = load_mask(mask_path)
         rf_pred = rf_predict(rf, img_path)
         unet_pred = None
         if not args.rf_only:
-            x = torch.tensor(cv2.resize(image_bgr, (IMAGE_SIZE, IMAGE_SIZE)) / 255.0).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE)
+            x = torch.tensor(cv2.resize(image_bgr, (IMAGE_SIZE, IMAGE_SIZE)) / 255.0).permute(2, 0, 1).unsqueeze(
+                0).float().to(DEVICE)
             with torch.no_grad():
                 pred = model(x)
                 unet_pred = torch.argmax(pred, dim=1).squeeze().cpu().numpy()
+
         save_qualitative(image_bgr, gt, rf_pred, unet_pred, outdir / f"sample_{i:02d}.png")
 
 
